@@ -1,0 +1,165 @@
+---
+title: "Practical Machine Learning Assignment"
+author: "Rhys Tutt"
+date: "26 September 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r include = FALSE, message = FALSE}
+library(caret)
+library(ggplot2)
+library(randomForest)
+library(gbm)
+```
+
+
+## Data Import and Clean-Up
+
+Import the datasets and review the data to make some initial observations.
+
+
+```{r }
+setwd("C:\\Users\\RTutt\\Desktop\\Practical Machine Learning\\Assignment")
+TrainingDataset <- read.csv("pml-training.csv", na.strings=c("","#DIV/0!","NA"), header=TRUE)
+TestingDataset <- read.csv("pml-testing.csv", na.strings=c("","#DIV/0!","NA"), header=TRUE)
+
+dim(TrainingDataset)
+dim(TestingDataset)
+str(TrainingDataset, list.len = 20)
+```
+
+There were "#DIV/0!" values visible, so I went back and assigned these to be NA strings upon importing the datasets. Can also see there are a lot of columns with NA and missing values, so these will need to be cleaned up using the colSums and is.na functions.
+
+```{r }
+set.seed(123)
+TrainingDataset <- TrainingDataset[,colSums(is.na(TrainingDataset)) == 0]
+TestingDataset <- TestingDataset[,colSums(is.na(TestingDataset)) == 0]
+```
+
+Next I'll review the data for any near zero variables, which shows there is one variable to be removed "new_window".
+
+```{r }
+nzv <- nearZeroVar(TrainingDataset, saveMetrics = TRUE)
+nzv[nzv$nzv == TRUE,]
+TrainingDataset$new_window <- NULL
+TestingDataset$new_window <- NULL
+```
+
+Also observed certain variables which contain user information that won't have any effect on the outcome so these are being removed.
+
+```{r }
+TrainingDataset <- TrainingDataset[, 6:59]
+TestingDataset <- TestingDataset[, 6:59]
+```
+
+
+## Splitting The Dataset
+
+Although we have already assigned a Training and Testing dataset, I'll now split the Training dataset further for training and validation. This is because we want to train the model on the training set, then test the accuracy on the validation set to predict the out of sample error rate and choose the best model. Then once I've picked the most appropriate model this will be used once to make predictions on the test set.
+
+```{r }
+inTrain <- createDataPartition(y = TrainingDataset$classe,
+                               p = 0.7, list = FALSE)
+
+training <- TrainingDataset[inTrain,]
+validating <- TrainingDataset[-inTrain,]
+```
+
+
+## Feature Selection and PCA
+
+As there are quite a lot of variables I'm going to use Caret's rfeControl function to reduce this number to the top 15 which predict the most variance. This in turn will reduce noise and make the model more interpretable.
+
+```{r }
+ctrl <- rfeControl(functions = rfFuncs,
+                   method = "cv",
+                   repeats = 0,
+                   verbose = FALSE)
+
+results <- rfe(x = training[,-54], y = training[,54],
+                 sizes = 15,
+                 rfeControl = ctrl)
+
+predictors(results)
+plot(results, type=c("g", "o"))
+```
+
+Although it's only a small amount, as seen from the plot, the model only becomes less accurate with additional variables. As such, I'm Only keeping these above 15 predictors remaining in the datasets for the model predictions.
+
+```{r }
+training <- training[,c("num_window","roll_belt","yaw_belt","magnet_dumbbell_z","pitch_belt","magnet_dumbbell_y","pitch_forearm","accel_dumbbell_y","roll_dumbbell","magnet_dumbbell_x","accel_dumbbell_z","roll_arm","roll_forearm","magnet_forearm_z","magnet_belt_z","classe")]
+validating <- validating[,c("num_window","roll_belt","yaw_belt","magnet_dumbbell_z","pitch_belt","magnet_dumbbell_y","pitch_forearm","accel_dumbbell_y","roll_dumbbell","magnet_dumbbell_x","accel_dumbbell_z","roll_arm","roll_forearm","magnet_forearm_z","magnet_belt_z","classe")]
+TestingDataset <- TestingDataset[,c("num_window","roll_belt","yaw_belt","magnet_dumbbell_z","pitch_belt","magnet_dumbbell_y","pitch_forearm","accel_dumbbell_y","roll_dumbbell","magnet_dumbbell_x","accel_dumbbell_z","roll_arm","roll_forearm","magnet_forearm_z","magnet_belt_z","problem_id")]
+```
+
+The last step before building the model is now reviewing the predictors to see if any are highly correlated. First I've removed those with a correlation of 1 as these are just referring to themselves and then using the threshold of 80% to define high correlation.
+
+```{r }
+corr <- abs(cor(training[,c("num_window","roll_belt","yaw_belt","magnet_dumbbell_z","pitch_belt","magnet_dumbbell_y","pitch_forearm","roll_dumbbell","magnet_dumbbell_x","accel_dumbbell_z","roll_arm","roll_forearm","magnet_forearm_z","magnet_belt_z")]))
+diag(corr) <- 0
+which(corr > 0.8, arr.ind = TRUE)
+```
+
+It is evident that "yaw_belt" and "roll_belt" are highly correlated so will perform PCA on them to combine them into one predictor, then adjust all the datasets and re-order the variables.
+
+```{r }
+pca <- preProcess(x = training[,c("yaw_belt","roll_belt")],
+                  method = "pca",
+                  pcaComp = 1)
+
+training <- predict(pca, training)
+validating <- predict(pca, validating)
+TestingDataset <- predict(pca, TestingDataset)
+
+training <- training[,c(1,2,3,4,5,6,7,8,9,10,11,12,13,15,14)]
+validating <- validating[,c(1,2,3,4,5,6,7,8,9,10,11,12,13,15,14)]
+```
+
+
+## Random Forest Model
+
+Build a Random Forest model.
+
+```{r }
+modrf <- randomForest(classe ~ ., data = training, ntree = 50, prox=TRUE)
+print(modrf)
+```
+
+
+## GBM Model
+
+Build a gradient boosted model using Caret's train function.
+
+```{r }
+modgbm <- train(data = training, classe ~ ., method = "gbm", verbose = FALSE)
+print(modgbm)
+```
+
+
+## Evaluating Models
+
+Make predictions from both models on the validation sets and then analyse these using Confusion Matrixes.
+
+The accuracy of the Random Forest model is 99.73% with an out-of-sample error rate of 0.27%. The accuracy of the gbm model is 99.27%, so the out of sample error is 0.73%. From these results it is evident that the Random Forest model is the best selection to predict on the test set.
+
+```{r }
+predrf <- predict(modrf, validating)
+predgbm <- predict(modgbm, validating)
+
+confusionMatrix(predrf, validating$classe)
+confusionMatrix(predgbm, validating$classe)
+```
+
+
+## Final Predictions on Test Set
+
+```{r }
+finalpred <- predict(modrf, TestingDataset)
+
+data.frame(TestingDataset$problem_id, finalpred)
+```
+
